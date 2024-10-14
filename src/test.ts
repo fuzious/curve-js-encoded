@@ -4,8 +4,10 @@ import { ICalldata } from "./interfaces";
 const rpc = "https://silent-white-wave.quiknode.pro/c4ad4fd208cc28788dff5c6ac55e445d91b6d88b/";
 const chainId = 1;
 const srcTokenAddress = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"; // weth polygon
-// const srcTokenAddress = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"; // usdc polygon
-const dstTokenAddress = "0xdAC17F958D2ee523a2206206994597C13D831ec7"; // usdt polygon
+// const srcTokenAddress = "0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f"; // gho polygon
+const dstTokenAddress = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"; // usdc polygon
+// const dstTokenAddress = "0xdAC17F958D2ee523a2206206994597C13D831ec7"; // usdt polygon
+// const dstTokenAddress = "0x514910771AF9Ca656af840dff83E8264EcF986CA"; // usdt polygon
 // const rpc = "https://arb1.arbitrum.io/rpc";
 // const chainId = 42161;
 // const srcTokenAddress = "0xca5ca9083702c56b481d1eec86f1776fdbd2e594"; // rsr polygon
@@ -35,12 +37,12 @@ export const main = async () => {
     const start0 = new Date().getTime();
     await curve.init("JsonRpc", { url: rpc }, { gasPrice: 0, maxFeePerGas: 0, maxPriorityFeePerGas: 0, chainId });
     await curve.factory.fetchPools(true);
-    await curve.crvUSDFactory.fetchPools(true);
-    await curve.EYWAFactory.fetchPools(true);
-    await curve.cryptoFactory.fetchPools(true);
-    await curve.twocryptoFactory.fetchPools(true);
-    await curve.tricryptoFactory.fetchPools(true);
-    await curve.stableNgFactory.fetchPools(true);
+    // await curve.crvUSDFactory.fetchPools(true);
+    // await curve.EYWAFactory.fetchPools(true);
+    // await curve.cryptoFactory.fetchPools(true);
+    // await curve.twocryptoFactory.fetchPools(true);
+    // await curve.tricryptoFactory.fetchPools(true);
+    // await curve.stableNgFactory.fetchPools(true);
     await curve.getAmplificationCoefficientsFromApi();
     console.log("factory pool list", curve.factory.getPoolList().length);
     const start = new Date().getTime();
