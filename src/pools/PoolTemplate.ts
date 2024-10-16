@@ -27,7 +27,7 @@ import {
     smartNumber,
     DIGas,
     _getAddress,
-    isMethodExist,
+    findAbiFunction,
     getVolumeApiController,
 } from '../utils.js';
 import {IDict, IReward, IProfit, IPoolType, IPoolData} from '../interfaces';
@@ -257,9 +257,8 @@ export class PoolTemplate {
     public rewardsOnly(): boolean {
         if (curve.chainId === 2222 || curve.chainId === 324) return true;  // TODO remove this for Kava and ZkSync
         if (this.gauge.address === curve.constants.ZERO_ADDRESS) throw Error(`${this.name} doesn't have gauge`);
-        const gaugeContract = curve.contracts[this.gauge.address].contract;
-
-        return !('inflation_rate()' in gaugeContract || 'inflation_rate(uint256)' in gaugeContract);
+        return !findAbiFunction(curve.contracts[this.gauge.address].abi, 'inflation_rate')
+            .find((func) => ['', 'uint256'].includes(func.inputs.map((a) => `${a.type}`).join(',')))
     }
 
     private statsParameters = async (): Promise<{
@@ -587,7 +586,7 @@ export class PoolTemplate {
 
                 const decimals = useUnderlying ? this.underlyingDecimals : this.wrappedDecimals;
                 const amounts = _amounts.map((_a, i) => curve.formatUnits(_a, decimals[i]));
-                const seedAmounts = await this.cryptoSeedAmounts(amounts[0]); // Checks N coins is 2 or 3 and amounts > 0
+                const seedAmounts = await this.getSeedAmounts(amounts[0]); // Checks N coins is 2 or 3 and amounts > 0
                 amounts.forEach((a, i) => {
                     if (!BN(a).eq(BN(seedAmounts[i]))) throw Error(`Amounts must be = ${seedAmounts}`);
                 });
@@ -633,17 +632,10 @@ export class PoolTemplate {
             const decimals = useUnderlying ? this.underlyingDecimals : this.wrappedDecimals;
             const amounts = _amounts.map((_a, i) => curve.formatUnits(_a, decimals[i]));
 
-            if (this.isMeta && useUnderlying) {
-                const seedAmounts = this.metaUnderlyingSeedAmounts(amounts[0]); // Checks N coins == 2 and amounts > 0
-                amounts.forEach((a, i) => {
-                    if (!BN(a).eq(BN(seedAmounts[i]))) throw Error(`Amounts must be = ${seedAmounts}`);
-                });
-            } else {
-                if (_amounts[0] <= curve.parseUnits("0")) throw Error("Initial deposit amounts must be > 0");
-                amounts.forEach((a) => {
-                    if (a !== amounts[0]) throw Error("Initial deposit amounts must be equal");
-                });
-            }
+            const seedAmounts = await this.getSeedAmounts(amounts[0]); // Checks N coins == 2 and amounts > 0
+            amounts.forEach((a, i) => {
+                if (!BN(a).eq(BN(seedAmounts[i]))) throw Error(`Amounts must be = ${seedAmounts}`);
+            });
 
             const _amounts18Decimals: bigint[] = amounts.map((a) => parseUnits(a));
             return _amounts18Decimals.reduce((_a, _b) => _a + _b);
@@ -685,43 +677,50 @@ export class PoolTemplate {
 
     // ---------------- DEPOSIT ----------------
 
-    public metaUnderlyingSeedAmounts(amount1: number | string): string[] {
-        if (this.isCrypto) throw Error(`Use cryptoSeedAmounts method for ${this.name} pool`);
-        if (!this.isMeta) throw Error("metaUnderlyingSeedAmounts method exists only for meta stable pools");
-
+    public async getSeedAmounts(amount1: number | string, useUnderlying = false): Promise<string[]> {
         const amount1BN = BN(amount1);
         if (amount1BN.lte(0)) throw Error("Initial deposit amounts must be > 0");
 
-        const amounts = [_cutZeros(amount1BN.toFixed(this.underlyingDecimals[0]))];
-        for (let i = 1; i < this.underlyingDecimals.length; i++) {
-            amounts.push(amount1BN.div(this.underlyingDecimals.length - 1).toFixed(this.underlyingDecimals[i]));
+        if (this.isCrypto) {
+            const decimals = this.isMeta ? this.wrappedDecimals : this.underlyingDecimals;
+
+            if (decimals.length === 2) {
+                const priceScaleBN = toBN(await curve.contracts[this.address].contract.price_scale(curve.constantOptions));
+                return [_cutZeros(amount1BN.toFixed(decimals[0])), _cutZeros(amount1BN.div(priceScaleBN).toFixed(decimals[1]))];
+            } else if (decimals.length === 3) {
+                const priceScaleBN = (await curve.multicallProvider.all([
+                    curve.contracts[this.address].multicallContract.price_scale(0),
+                    curve.contracts[this.address].multicallContract.price_scale(1),
+                ]) as bigint[]).map((_p) => toBN(_p));
+                return [
+                    _cutZeros(amount1BN.toFixed(decimals[0])),
+                    _cutZeros(amount1BN.div(priceScaleBN[0]).toFixed(decimals[1])),
+                    _cutZeros(amount1BN.div(priceScaleBN[1]).toFixed(decimals[2])),
+                ];
+            }
+
+            throw Error("getSeedAmounts method doesn't exist for crypto pools with N coins > 3");
+        } else {
+            const amounts = [_cutZeros(amount1BN.toFixed(this.wrappedDecimals[0]))];
+
+            if (this.isMeta && useUnderlying) {
+                const basePool = new PoolTemplate(this.basePool);
+                const basePoolBalancesBN = (await basePool.stats.underlyingBalances()).map(BN);
+                const totalBN = basePoolBalancesBN.reduce((a, b) => a.plus(b));
+                for (let i = 1; i < this.underlyingDecimals.length; i++) {
+                    amounts.push(amount1BN.times(basePoolBalancesBN[i - 1]).div(totalBN).toFixed(this.underlyingDecimals[i]));
+                }
+
+                return amounts.map(_cutZeros)
+            }
+
+            const storedRatesBN = await this._storedRatesBN(false);
+            for (let i = 1; i < this.wrappedDecimals.length; i++) {
+                amounts.push(amount1BN.times(storedRatesBN[0]).div(storedRatesBN[i]).toFixed(this.wrappedDecimals[i]));
+            }
+
+            return amounts.map(_cutZeros)
         }
-
-        return amounts
-    }
-
-    public async cryptoSeedAmounts(amount1: number | string): Promise<string[]> {
-        if (!this.isCrypto) throw Error("cryptoSeedAmounts method doesn't exist for stable pools");
-        const decimals = this.isMeta ? this.wrappedDecimals : this.underlyingDecimals;
-        const amount1BN = BN(amount1);
-        if (amount1BN.lte(0)) throw Error("Initial deposit amounts must be > 0");
-
-        if (decimals.length === 2) {
-            const priceScaleBN = toBN(await curve.contracts[this.address].contract.price_scale(curve.constantOptions));
-            return [_cutZeros(amount1BN.toFixed(decimals[0])), _cutZeros(amount1BN.div(priceScaleBN).toFixed(decimals[1]))];
-        } else if (decimals.length === 3) {
-            const priceScaleBN = (await curve.multicallProvider.all([
-                curve.contracts[this.address].multicallContract.price_scale(0),
-                curve.contracts[this.address].multicallContract.price_scale(1),
-            ]) as bigint[]).map((_p) => toBN(_p));
-            return [
-                _cutZeros(amount1BN.toFixed(decimals[0])),
-                _cutZeros(amount1BN.div(priceScaleBN[0]).toFixed(decimals[1])),
-                _cutZeros(amount1BN.div(priceScaleBN[1]).toFixed(decimals[2])),
-            ];
-        }
-
-        throw Error("cryptoSeedAmounts method doesn't exist for pools with N coins > 3");
     }
 
     // OVERRIDE
@@ -760,31 +759,21 @@ export class PoolTemplate {
 
     public async depositBonus(amounts: (number | string)[]): Promise<string> {
         const amountsBN = amounts.map(BN);
-        let prices: number[] = [];
-
-
-        //for crvusd and stable-ng implementations
-        const isUseStoredRates = isMethodExist(curve.contracts[this.address].contract, 'stored_rates') && this.isPlain;
+        let pricesBN: BigNumber[] = [];
 
         if(this.isCrypto || this.id === 'wsteth') {
-            prices = await this._underlyingPrices();
-        } else if (isUseStoredRates) {
-            const result = await this._stored_rates();
-            result.forEach((item, index) => {
-                prices.push(Number(item)/(10 ** (36 - this.underlyingDecimals[index])))
-            })
+            pricesBN = (await this._underlyingPrices()).map(BN);
         } else {
-            prices = this.underlyingCoins.map(() => 1);
+            pricesBN = await this._storedRatesBN(true);
         }
 
-        const pricesBN = prices.map(BN);
         const balancesBN = (await this.stats.underlyingBalances()).map(BN);
         const balancedAmounts = this._balancedAmountsWithSameValue(amountsBN, pricesBN, balancesBN);
 
         const expectedBN = BN(await this.depositExpected(amounts));
         const balancedExpectedBN = BN(await this.depositExpected(balancedAmounts));
 
-        return String(expectedBN.minus(balancedExpectedBN).div(balancedExpectedBN).times(100))
+        return expectedBN.minus(balancedExpectedBN).div(balancedExpectedBN).times(100).toString()
     }
 
     public async depositIsApproved(amounts: (number | string)[]): Promise<boolean> {
@@ -1007,22 +996,76 @@ export class PoolTemplate {
 
     public async claimCrvEstimateGas(): Promise<number | number[]> {
         if (this.rewardsOnly()) throw Error(`${this.name} has Rewards-Only Gauge. Use claimRewards instead`);
-        if(curve.chainId === 1) {
-            return Number(await curve.contracts[curve.constants.ALIASES.minter].contract.mint.estimateGas(this.gauge.address, curve.constantOptions));
+
+        let isOldFactory = false;
+        let contract;
+
+        if (curve.chainId !== 1) {
+            if (curve.constants.ALIASES.child_gauge_factory_old && curve.constants.ALIASES.child_gauge_factory_old !== curve.constants.ZERO_ADDRESS) {
+                const oldFactoryContract = curve.contracts[curve.constants.ALIASES.child_gauge_factory_old].contract;
+                const gaugeAddress = await oldFactoryContract.get_gauge_from_lp_token(this.lpToken);
+
+                isOldFactory = gaugeAddress.toLowerCase() === this.gauge.address.toLowerCase();
+
+                if (isOldFactory) {
+                    contract = oldFactoryContract;
+                }
+            }
+        }
+
+        if (!isOldFactory) {
+            contract = curve.chainId === 1 ?
+                curve.contracts[curve.constants.ALIASES.minter].contract :
+                curve.contracts[curve.constants.ALIASES.child_gauge_factory].contract;
+        }
+
+        if (!contract) {
+            throw new Error("Failed to find the correct contract for estimating gas");
+        }
+
+        if (curve.chainId === 1) {
+            return Number(await contract.mint.estimateGas(this.gauge.address, curve.constantOptions));
         } else {
-            return smartNumber(await curve.contracts[curve.constants.ALIASES.gauge_factory].contract.mint.estimateGas(this.gauge.address, curve.constantOptions));
+            return smartNumber(await contract.mint.estimateGas(this.gauge.address, curve.constantOptions));
         }
     }
 
+
     public async claimCrv(): Promise<string> {
         if (this.rewardsOnly()) throw Error(`${this.name} has Rewards-Only Gauge. Use claimRewards instead`);
-        const contract = curve.chainId === 1 ? curve.contracts[curve.constants.ALIASES.minter].contract : curve.contracts[curve.constants.ALIASES.gauge_factory].contract;
+
+        let isOldFactory = false;
+        let contract;
+
+        if (curve.chainId !== 1) {
+            if (curve.constants.ALIASES.child_gauge_factory_old && curve.constants.ALIASES.child_gauge_factory_old !== curve.constants.ZERO_ADDRESS) {
+                const oldFactoryContract = curve.contracts[curve.constants.ALIASES.child_gauge_factory_old].contract;
+                const gaugeAddress = await oldFactoryContract.get_gauge_from_lp_token(this.lpToken);
+
+                isOldFactory = gaugeAddress.toLowerCase() === this.gauge.address.toLowerCase();
+
+                if (isOldFactory) {
+                    contract = oldFactoryContract;
+                }
+            }
+        }
+
+        if (!isOldFactory) {
+            contract = curve.chainId === 1 ?
+                curve.contracts[curve.constants.ALIASES.minter].contract :
+                curve.contracts[curve.constants.ALIASES.child_gauge_factory].contract;
+        }
+
+        if (!contract) {
+            throw new Error("Failed to find the correct contract for minting");
+        }
 
         await curve.updateFeeData();
 
         const gasLimit = mulBy1_3(DIGas(await contract.mint.estimateGas(this.gauge.address, curve.constantOptions)));
         return (await contract.mint(this.gauge.address, { ...curve.options, gasLimit })).hash;
     }
+
 
     public userBoost = async (address = ""): Promise<string> => {
         if (this.gauge.address === curve.constants.ZERO_ADDRESS) throw Error(`${this.name} doesn't have gauge`);
@@ -1669,29 +1712,21 @@ export class PoolTemplate {
     }
 
     public async withdrawImbalanceBonus(amounts: (number | string)[]): Promise<string> {
-        let prices: number[] = [];
-
-        //for crvusd and stable-ng implementations
-        const isUseStoredRates = isMethodExist(curve.contracts[this.address].contract, 'stored_rates') && this.isPlain;
+        let pricesBN: BigNumber[] = [];
 
         if(this.isCrypto || this.id === 'wsteth') {
-            prices = await this._underlyingPrices();
-        } else if (isUseStoredRates) {
-            const result = await this._stored_rates();
-            result.forEach((item, index) => {
-                prices.push(Number(item)/(10 ** (36 - this.underlyingDecimals[index])))
-            })
+            pricesBN = (await this._underlyingPrices()).map(BN);
         } else {
-            prices = this.underlyingCoins.map(() => 1);
+            pricesBN = await this._storedRatesBN(true);
         }
 
-        const value = amounts.map(checkNumber).map(Number).reduce((s, a, i) => s + (a * prices[i]), 0);
+        const valueBN = amounts.map(BN).reduce((sBN, aBN, i) => pricesBN[i].times(aBN).plus(sBN), BN(0));
         const lpTokenAmount = await this.withdrawImbalanceExpected(amounts);
 
         const balancedAmounts = await this.withdrawExpected(lpTokenAmount);
-        const balancedValue = balancedAmounts.map(Number).reduce((s, a, i) => s + (a * prices[i]), 0);
+        const balancedValueBN = balancedAmounts.map(BN).reduce((sBN, aBN, i) => pricesBN[i].times(aBN).plus(sBN), BN(0));
 
-        return String((value - balancedValue) / balancedValue * 100);
+        return valueBN.minus(balancedValueBN).div(balancedValueBN).times(100).toString();
     }
 
     public async withdrawImbalanceIsApproved(amounts: (number | string)[]): Promise<boolean> {
@@ -1786,30 +1821,23 @@ export class PoolTemplate {
     }
 
     public async withdrawOneCoinBonus(lpTokenAmount: number | string, coin: string | number): Promise<string> {
-        let prices: number[] = [];
-
-        //for crvusd and stable-ng implementations
-        const isUseStoredRates = isMethodExist(curve.contracts[this.address].contract, 'stored_rates') && this.isPlain;
+        let pricesBN: BigNumber[] = [];
 
         if(this.isCrypto || this.id === 'wsteth') {
-            prices = await this._underlyingPrices();
-        } else if (isUseStoredRates) {
-            const result = await this._stored_rates();
-            result.forEach((item, index) => {
-                prices.push(Number(item)/(10 ** (36 - this.underlyingDecimals[index])))
-            })
+            pricesBN = (await this._underlyingPrices()).map(BN);
         } else {
-            prices = this.underlyingCoins.map(() => 1);
+            pricesBN = await this._storedRatesBN(true);
         }
-        const coinPrice = prices[this._getCoinIdx(coin)];
 
-        const amount = Number(await this.withdrawOneCoinExpected(lpTokenAmount, coin));
-        const value = amount * coinPrice;
+        const coinPriceBN = pricesBN[this._getCoinIdx(coin)];
+
+        const amountBN = BN(await this.withdrawOneCoinExpected(lpTokenAmount, coin));
+        const valueBN = amountBN.times(coinPriceBN);
 
         const balancedAmounts = await this.withdrawExpected(lpTokenAmount);
-        const balancedValue = balancedAmounts.map(Number).reduce((s, a, i) => s + (a * prices[i]), 0);
+        const balancedValueBN = balancedAmounts.map(BN).reduce((sBN, aBN, i) => pricesBN[i].times(aBN).plus(sBN), BN(0));
 
-        return String((value - balancedValue) / balancedValue * 100);
+        return valueBN.minus(balancedValueBN).div(balancedValueBN).times(100).toString();
     }
 
     public async withdrawOneCoinIsApproved(lpTokenAmount: number | string): Promise<boolean> {
@@ -2342,8 +2370,21 @@ export class PoolTemplate {
         return addresses.length === 1 ? balances[addresses[0]] : balances
     }
 
-    private _stored_rates = async (): Promise<number[]> => {
-        return await curve.contracts[this.address].contract.stored_rates();
+    private _storedRatesBN = async (useUnderlying: boolean): Promise<BigNumber[]> => {
+        if (this.isMeta) {
+            if (useUnderlying) return this.underlyingCoins.map(() => BN(1));
+
+            const _vp = await curve.contracts[curve.getPoolsData()[this.basePool].swap_address].contract.get_virtual_price();
+            return [BN(1), toBN(_vp)]
+        }
+
+        //for crvusd and stable-ng implementations
+        if (findAbiFunction(curve.contracts[this.address].abi, 'stored_rates').length > 0 && this.isPlain) {
+            const _stored_rates: bigint[] = await curve.contracts[this.address].contract.stored_rates();
+            return _stored_rates.map((_r, i) => toBN(_r, 36 - this.wrappedDecimals[i]));
+        }
+
+        return this.wrappedCoins.map(() => BN(1))
     }
 
     private _underlyingPrices = async (): Promise<number[]> => {

@@ -1,8 +1,9 @@
 import axios from 'axios';
-import {BrowserProvider, Contract, JsonRpcProvider, Signer} from 'ethers';
-import { Contract as MulticallContract } from "@curvefi/ethcall";
+import {Contract} from 'ethers';
+import {Contract as MulticallContract} from "@curvefi/ethcall";
 import BigNumber from 'bignumber.js';
 import {
+    Abi, AbiFunction,
     IBasePoolShortItem,
     IChainId,
     IDict,
@@ -48,7 +49,7 @@ export const MAX_ALLOWANCE = BigInt("1157920892373161954235709850086879078532699
 // Formatting numbers
 
 export const _cutZeros = (strn: string): string => {
-    return strn.replace(/0+$/gi, '').replace(/\.$/gi, '');
+    return strn.replace(/(\.\d*[1-9])0+$/gi, '$1').replace(/\.0+$/gi, '');
 }
 
 export const checkNumber = (n: number | string): number | string => {
@@ -322,16 +323,9 @@ export const ensureAllowance = async (coins: string[], amounts: (number | string
 
 export const getPoolIdBySwapAddress = (swapAddress: string): string => {
     const poolsData = curve.getPoolsData();
-    const poolIds = Object.entries(poolsData).filter(([_, poolData]) => poolData.swap_address.toLowerCase() === swapAddress.toLowerCase());
+    const poolIds = Object.entries(poolsData).filter(([, poolData]) => poolData.swap_address.toLowerCase() === swapAddress.toLowerCase());
     if (poolIds.length === 0) return "";
     return poolIds[0][0];
-}
-
-const _getTokenAddressBySwapAddress = (swapAddress: string): string => {
-    const poolsData = curve.getPoolsData()
-    const res = Object.entries(poolsData).filter(([_, poolData]) => poolData.swap_address.toLowerCase() === swapAddress.toLowerCase());
-    if (res.length === 0) return "";
-    return res[0][1].token_address;
 }
 
 export const _getUsdPricesFromApi = async (): Promise<IDict<number>> => {
@@ -394,19 +388,12 @@ export const _getUsdPricesFromApi = async (): Promise<IDict<number>> => {
     }
 
     for(const address in priceDict) {
-        if(priceDict[address].length > 0) {
-            const maxTvlItem = priceDict[address].reduce((prev, current) => {
-                if (+current.tvl > +prev.tvl) {
-                    return current;
-                } else {
-                    return prev;
-                }
-            });
+        if (priceDict[address].length) {
+            const maxTvlItem = priceDict[address].reduce((prev, current) => +current.tvl > +prev.tvl ? current : prev);
             priceDictByMaxTvl[address] = maxTvlItem.price
         } else {
             priceDictByMaxTvl[address] = 0
         }
-
     }
 
     return priceDictByMaxTvl
@@ -542,7 +529,7 @@ export const getUsdRate = async (coin: string): Promise<number> => {
     return await _getUsdRate(coinAddress);
 }
 
-export const getBaseFeeByLastBlock = async ()  => {
+export const getBaseFeeByLastBlock = async (): Promise<number> => {
     const provider = curve.provider;
 
     try {
@@ -577,6 +564,9 @@ export const getGasPriceFromL2 = async (): Promise<number> => {
     if(curve.chainId === 196) {
         return await getGasPrice() // gwei
     }
+    if(curve.chainId === 324) {
+        return await getGasPrice() // gwei
+    }
     if(curve.chainId === 5000) {
         return await getGasPrice() // gwei
     }
@@ -599,7 +589,13 @@ export const getGasInfoForL2 = async (): Promise<Record<string, number | null>> 
     } else if(curve.chainId === 196) {
         const gasPrice = await getGasPrice()
 
-        return  {
+        return {
+            gasPrice,
+        }
+    } else if(curve.chainId === 324) {
+        const gasPrice = await getGasPrice()
+
+        return {
             gasPrice,
         }
     } else if(curve.chainId === 5000) {
@@ -627,17 +623,6 @@ const _getNetworkName = (network: INetworkName | IChainId = curve.chainId): INet
         return NETWORK_CONSTANTS[network].NAME;
     } else if (typeof network === "string" && Object.values(NETWORK_CONSTANTS).map((n) => n.NAME).includes(network)) {
         return network;
-    } else {
-        throw Error(`Wrong network name or id: ${network}`);
-    }
-}
-
-const _getChainId = (network: INetworkName | IChainId = curve.chainId): IChainId => {
-    if (typeof network === "number" && NETWORK_CONSTANTS[network]) {
-        return network;
-    } else if (typeof network === "string" && Object.values(NETWORK_CONSTANTS).map((n) => n.NAME).includes(network)) {
-        const idx = Object.values(NETWORK_CONSTANTS).map((n) => n.NAME).indexOf(network);
-        return Number(Object.keys(NETWORK_CONSTANTS)[idx]) as IChainId;
     } else {
         throw Error(`Wrong network name or id: ${network}`);
     }
@@ -672,6 +657,7 @@ export const getVolume = async (network: INetworkName | IChainId = curve.chainId
 
 export const _setContracts = (address: string, abi: any): void => {
     curve.contracts[address] = {
+        abi,
         contract: new Contract(address, abi, curve.signer || curve.provider),
         multicallContract: new MulticallContract(address, abi),
     }
@@ -732,7 +718,7 @@ export const getCoinsData = async (...coins: string[] | string[][]): Promise<{na
     }
 
     const res: {name: string, symbol: string, decimals: number}[]  = [];
-    coins.forEach((address: string, i: number) => {
+    coins.forEach(() => {
         res.push({
             name: _response.shift() as string,
             symbol: _response.shift() as string,
@@ -747,23 +733,13 @@ export const getCoinsData = async (...coins: string[] | string[][]): Promise<{na
 export const hasDepositAndStake = (): boolean => curve.constants.ALIASES.deposit_and_stake !== curve.constants.ZERO_ADDRESS;
 export const hasRouter = (): boolean => curve.constants.ALIASES.router !== curve.constants.ZERO_ADDRESS;
 
-export const getCountArgsOfMethodByContract = (contract: Contract, methodName: string): number => {
-    const func = contract.interface.fragments.find((item: any) => item.name === methodName);
-    if(func) {
-        return func.inputs.length;
-    } else {
-        return -1;
-    }
-}
+export const findAbiFunction = (abi: Abi, methodName: string) =>
+    abi.filter((item) => item.type == 'function' && item.name === methodName) as AbiFunction[]
 
-export const isMethodExist = (contract: Contract, methodName: string): boolean => {
-    const func = contract.interface.fragments.find((item: any) => item.name === methodName);
-    if(func) {
-        return true;
-    } else {
-        return false;
-    }
-}
+export const getCountArgsOfMethodByAbi = (abi: Abi, methodName: string): number => findAbiFunction(abi, methodName)[0]?.inputs.length ?? -1
+
+export const findAbiSignature = (abi: Abi, methodName: string, signature: string) =>
+    findAbiFunction(abi, methodName).find((func) => func.inputs.map((i) => `${i.type}`).join(',') == signature)
 
 export const getPoolName = (name: string): string => {
     const separatedName = name.split(": ")
@@ -774,9 +750,7 @@ export const getPoolName = (name: string): string => {
     }
 }
 
-export const isStableNgPool = (name: string): boolean => {
-    return name.includes('factory-stable-ng')
-}
+export const isStableNgPool = (name: string): boolean => name.includes('factory-stable-ng')
 
 export const assetTypeNameHandler = (assetTypeName: string): REFERENCE_ASSET => {
     if (assetTypeName.toUpperCase() === 'UNKNOWN') {
@@ -815,30 +789,38 @@ export const getBasePools = async (): Promise<IBasePoolShortItem[]> => {
     })
 }
 
-export const memoizedContract = (): (address: string, abi: any, provider: BrowserProvider | JsonRpcProvider | Signer) => Contract => {
-    const cache: Record<string, Contract> = {};
-    return (address: string, abi: any, provider: BrowserProvider | JsonRpcProvider | Signer): Contract => {
-        if (address in cache) {
-            return cache[address];
-        }
-        else {
-            const result = new Contract(address, abi, provider)
-            cache[address] = result;
-            return result;
-        }
+export function log(fnName: string, ...args: unknown[]): void {
+    if (process.env.NODE_ENV === 'development') {
+        console.log(`curve-js@${new Date().toISOString()} -> ${fnName}:`, ...args)
     }
 }
 
-export const memoizedMulticallContract = (): (address: string, abi: any) => MulticallContract => {
-    const cache: Record<string, MulticallContract> = {};
-    return (address: string, abi: any): MulticallContract => {
-        if (address in cache) {
-            return cache[address];
-        }
-        else {
-            const result = new MulticallContract(address, abi)
-            cache[address] = result;
-            return result;
-        }
+export function runWorker<In extends { type: string }, Out>(code: string, syncFn: () => ((val: In) => Out) | undefined, inputData: In, timeout = 30000): Promise<Out> {
+    if (typeof Worker === 'undefined') {
+        // in nodejs run worker in main thread
+        return Promise.resolve(syncFn()!(inputData));
     }
+
+    const blob = new Blob([code], { type: 'application/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    const worker = new Worker(blobUrl, {type: 'module'});
+    return new Promise<Out>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Timeout')), timeout);
+        worker.onerror = (e) => {
+            clearTimeout(timer);
+            console.error(code, inputData, e);
+            reject(e);
+        };
+        worker.onmessage = (e) => {
+            const {type, result} = e.data;
+            if (type === inputData.type) {
+                clearTimeout(timer);
+                resolve(result);
+                // console.log(code, inputData, result, start - Date.now());
+            }
+        };
+        worker.postMessage(inputData);
+    }).finally(() => {
+        worker.terminate();
+    });
 }

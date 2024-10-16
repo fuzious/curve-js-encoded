@@ -20,24 +20,8 @@ import {
     swapWrappedMixin,
     swapWrappedRequiredMixin,
 } from "./mixins/swapWrappedMixins.js";
-import { getCountArgsOfMethodByContract } from "../utils.js";
-import { IPoolData } from '../interfaces.js'
+import { getCountArgsOfMethodByAbi, findAbiSignature } from "../utils.js";
 
-export const getPoolForStatLiquidity = (poolId: string, poolData: IPoolData): PoolTemplate => {
-    return new PoolTemplate(poolId, poolData);
-    // const poolDummy = new PoolTemplate(poolId, poolData);
-    // class Pool extends PoolTemplate {}
-
-    // // statsBalances, keep this because statLiquidity uses function statsUnderlyingBalances()
-    // if (poolDummy.isMeta) {
-    //     Object.assign(Pool.prototype, poolBalancesMetaMixin);
-    // } else if (poolDummy.useLending.reduce((x, y) => x || y)) {
-    //     Object.assign(Pool.prototype, poolBalancesLendingMixin);
-    // }
-
-    // return new Pool(poolId, poolData);
-}
-    
 
 export const getPool = (poolId: string): PoolTemplate => {
     const poolDummy = new PoolTemplate(poolId);
@@ -75,7 +59,7 @@ export const getPool = (poolId: string): PoolTemplate => {
         }
     } else if (poolDummy.zap && poolId !== 'susd') {
         Object.assign(Pool.prototype, depositZapMixin);
-    } else if (getCountArgsOfMethodByContract(curve.contracts[poolDummy.address].contract, 'add_liquidity') > 2) {
+    } else if (getCountArgsOfMethodByAbi(curve.contracts[poolDummy.address].abi, 'add_liquidity') > 2) {
         Object.assign(Pool.prototype, depositLendingOrCryptoMixin);
     } else {
         Object.assign(Pool.prototype, depositPlainMixin);
@@ -108,7 +92,7 @@ export const getPool = (poolId: string): PoolTemplate => {
         }
     } else if (poolDummy.zap && poolId !== 'susd') {
         Object.assign(Pool.prototype, withdrawZapMixin);
-    } else if (getCountArgsOfMethodByContract(curve.contracts[poolDummy.address].contract, 'remove_liquidity') > 2) {
+    } else if (getCountArgsOfMethodByAbi(curve.contracts[poolDummy.address].abi, 'remove_liquidity') > 2) {
         Object.assign(Pool.prototype, withdrawLendingOrCryptoMixin);
     } else {
         Object.assign(Pool.prototype, withdrawPlainMixin);
@@ -167,7 +151,7 @@ export const getPool = (poolId: string): PoolTemplate => {
         }
     } else if (poolDummy.zap) { // including susd
         Object.assign(Pool.prototype, withdrawOneCoinZapMixin);
-    } else if (getCountArgsOfMethodByContract(curve.contracts[poolDummy.address].contract, 'remove_liquidity_one_coin') > 3) {
+    } else if (getCountArgsOfMethodByAbi(curve.contracts[poolDummy.address].abi, 'remove_liquidity_one_coin') > 3) {
         Object.assign(Pool.prototype, withdrawOneCoinLendingOrCryptoMixin);
     } else {
         Object.assign(Pool.prototype, withdrawOneCoinPlainMixin);
@@ -192,7 +176,7 @@ export const getPool = (poolId: string): PoolTemplate => {
     }
 
     // swap and swapEstimateGas
-    if ('exchange(uint256,uint256,uint256,uint256,bool)' in curve.contracts[poolDummy.address].contract &&
+    if (findAbiSignature(curve.contracts[poolDummy.address].abi, 'exchange', 'uint256,uint256,uint256,uint256,bool') &&
         !(curve.chainId === 100 && poolDummy.id === "tricrypto")) { // tricrypto2 (eth), tricrypto (arbitrum), avaxcrypto (avalanche); 100 is xDAI
         Object.assign(Pool.prototype, swapTricrypto2Mixin);
     } else if (poolDummy.isMetaFactory && (getPool(poolDummy.basePool).isLending || getPool(poolDummy.basePool).isFake || poolDummy.isCrypto)) {
@@ -209,7 +193,7 @@ export const getPool = (poolId: string): PoolTemplate => {
     if (!poolDummy.isPlain && !poolDummy.isFake) {
         Object.assign(Pool.prototype, swapWrappedExpectedAndApproveMixin);
         Object.assign(Pool.prototype, swapWrappedRequiredMixin);
-        if ('exchange(uint256,uint256,uint256,uint256,bool)' in curve.contracts[poolDummy.address].contract) { // tricrypto2 (eth), tricrypto (arbitrum)
+        if (findAbiSignature(curve.contracts[poolDummy.address].abi, 'exchange', 'uint256,uint256,uint256,uint256,bool')) { // tricrypto2 (eth), tricrypto (arbitrum)
             Object.assign(Pool.prototype, swapWrappedTricrypto2Mixin);
         } else {
             Object.assign(Pool.prototype, swapWrappedMixin);

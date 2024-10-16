@@ -175,12 +175,7 @@ export interface IPoolDataShort {
   address: string;
 }
 
-export interface ISubgraphPoolData {
-  address: string;
-  volumeUSD: number;
-  latestDailyApy: number;
-  latestWeeklyApy: number;
-}
+export type IRoutePoolData = Pick<IPoolData, 'is_lending' | 'wrapped_coin_addresses' | 'underlying_coin_addresses' | 'token_address'>;
 
 export interface IExtendedPoolDataFromApi {
   poolData: IPoolDataFromApi[];
@@ -234,20 +229,21 @@ export interface IProfit {
 }
 
 export interface IGaugesDataFromApi {
-  gauge: string;
-  swap: string;
-  swap_token: string;
-  shortName: string;
-  gauge_controller: {
-    gauge_relative_weight: string;
-    get_gauge_weight: string;
-  };
-  poolUrls: {
-    swap: string[];
-  };
-  is_killed?: boolean;
-  hasNoCrv?: boolean;
-  gaugeStatus?: Record<string, boolean> | null;
+    blockchainId: string;
+    gauge: string,
+    swap: string,
+    swap_token: string,
+    shortName: string,
+    gauge_controller: {
+        gauge_relative_weight: string,
+        get_gauge_weight: string,
+    },
+    poolUrls?: {
+        swap: string[],
+    }
+    is_killed?: boolean,
+    hasNoCrv?: boolean,
+    gaugeStatus?: Record<string, boolean> | null,
 }
 
 export interface IVotingGauge {
@@ -335,4 +331,24 @@ export interface IBasePoolShortItem {
   token: string;
 }
 
-export type TVoteType = "PARAMETER" | "OWNERSHIP";
+export type TVoteType = "PARAMETER" | "OWNERSHIP"
+
+export type AbiParameter = { type: string, name?:string, components?: readonly AbiParameter[] }
+type CtorMutability = 'payable' | 'nonpayable';
+export type AbiStateMutability = 'pure' | 'view' | CtorMutability
+export type AbiFunction = {
+    type: 'function'
+    constant?: boolean
+    gas?: number
+    inputs: readonly AbiParameter[]
+    name: string
+    outputs: readonly AbiParameter[]
+    payable?: boolean | undefined
+    stateMutability: AbiStateMutability
+}
+export type AbiConstructor = { type: 'constructor', inputs: readonly AbiParameter[], payable?: boolean, stateMutability: CtorMutability }
+export type AbiFallback = { type: 'fallback', payable?: boolean, stateMutability: CtorMutability }
+export type AbiReceive = {type: 'receive', stateMutability: Extract<AbiStateMutability, 'payable'>}
+export type AbiEvent = {type: 'event', anonymous?: boolean, inputs: readonly AbiParameter[], name: string}
+export type AbiError = {type: 'error', inputs: readonly AbiParameter[], name: string}
+export type Abi = (AbiConstructor | AbiError | AbiEvent | AbiFallback | AbiFunction | AbiReceive)[]
