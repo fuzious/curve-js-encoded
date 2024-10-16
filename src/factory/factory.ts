@@ -111,11 +111,11 @@ function _handleCoinAddresses(this: ICurve, coinAddresses: string[][]): string[]
     );
 }
 
-async function getPoolsData(this: ICurve, factorySwapAddresses: string[], factoryAddress: string): Promise<[string[], string[], REFERENCE_ASSET[], string[], string[], boolean[], string[][]]> {
+async function getPoolsData(this: ICurve, factorySwapAddresses: string[], factoryAddress: string): Promise<[string[], string[], string[], REFERENCE_ASSET[], string[], string[], boolean[], string[][]]> {
     const factoryMulticallContract = this.contracts[factoryAddress].multicallContract;
-    const isFactoryGaugeNull = this.constants.ALIASES.gauge_factory === '0x0000000000000000000000000000000000000000';
+    const isChildGaugeFactoryNull = curve.chainId !== 1 && this.constants.ALIASES.child_gauge_factory === curve.constants.ZERO_ADDRESS;
+    const isChildGaugeFactoryOldNull = !("child_gauge_factory_old" in this.constants.ALIASES);
     const isStableNgFactory = factoryAddress === this.constants.ALIASES['stable_ng_factory'];
-    const factoryGaugeContract = this.contracts[this.constants.ALIASES.gauge_factory].multicallContract;
 
     const calls = [];
     for (const addr of factorySwapAddresses) {
@@ -125,13 +125,17 @@ async function getPoolsData(this: ICurve, factorySwapAddresses: string[], factor
 
         if(this.chainId === 1) {
             calls.push(factoryMulticallContract.get_gauge(addr));
-        } else if(!isFactoryGaugeNull) {
-            calls.push(factoryGaugeContract.get_gauge_from_lp_token(addr));
+        } else {
+            if(!isChildGaugeFactoryNull) {
+                calls.push(this.contracts[this.constants.ALIASES.child_gauge_factory].multicallContract.get_gauge_from_lp_token(addr));
+            }
+            if(!isChildGaugeFactoryOldNull) {
+                calls.push(this.contracts[this.constants.ALIASES.child_gauge_factory_old].multicallContract.get_gauge_from_lp_token(addr));
+            }
         }
 
-        if(!isStableNgFactory) {
-            calls.push(factoryMulticallContract.get_pool_asset_type(addr));
-        }
+        if (!isStableNgFactory) calls.push(factoryMulticallContract.get_pool_asset_type(addr));
+
         calls.push(tempSwapContract.symbol());
         calls.push(tempSwapContract.name());
         calls.push(factoryMulticallContract.is_meta(addr));
@@ -140,31 +144,24 @@ async function getPoolsData(this: ICurve, factorySwapAddresses: string[], factor
 
     const res = await this.multicallProvider.all(calls);
 
-    if(isFactoryGaugeNull) {
+    if(isChildGaugeFactoryNull || isChildGaugeFactoryOldNull || isStableNgFactory) {
         for(let index = 0; index < res.length; index++) {
-            if(index % 7 == 1) {
-                res.splice(index, 0 , '0x0000000000000000000000000000000000000000');
-            }
+            if(isChildGaugeFactoryNull && index % 8 == 1) res.splice(index, 0 , curve.constants.ZERO_ADDRESS);
+            if(isChildGaugeFactoryOldNull && index % 8 == 2) res.splice(index, 0 , curve.constants.ZERO_ADDRESS);
+            if(isStableNgFactory && index % 8 == 3) res.splice(index, 0 , -1);
         }
     }
 
-    if(isStableNgFactory) {
-        for(let index = 0; index < res.length; index++) {
-            if(index % 7 == 2) {
-                res.splice(index, 0 , -1);
-            }
-        }
-    }
+    const implememntationAddresses = (res.filter((a, i) => i % 8 == 0) as string[]).map((a) => a.toLowerCase());
+    const gaugeAddresses = (res.filter((a, i) => i % 8 == 1) as string[]).map((a) => a.toLowerCase());
+    const oldGaugeAddresses = (res.filter((a, i) => i % 8 == 2) as string[]).map((a) => a.toLowerCase());
+    const referenceAssets = _handleReferenceAssets(res.filter((a, i) => i % 8 == 3) as bigint[]);
+    const symbols = res.filter((a, i) => i % 8 == 4) as string[];
+    const names = res.filter((a, i) => i % 8 == 5) as string[];
+    const isMeta = res.filter((a, i) => i % 8 == 6) as boolean[];
+    const coinAddresses = _handleCoinAddresses.call(this, res.filter((a, i) => i % 8 == 7) as string[][]);
 
-    const implememntationAddresses = (res.filter((a, i) => i % 7 == 0) as string[]).map((a) => a.toLowerCase());
-    const gaugeAddresses = (res.filter((a, i) => i % 7 == 1) as string[]).map((a) => a.toLowerCase());
-    const referenceAssets = _handleReferenceAssets(res.filter((a, i) => i % 7 == 2) as bigint[]);
-    const symbols = res.filter((a, i) => i % 7 == 3) as string[];
-    const names = res.filter((a, i) => i % 7 == 4) as string[];
-    const isMeta = res.filter((a, i) => i % 7 == 5) as boolean[];
-    const coinAddresses = _handleCoinAddresses.call(this, res.filter((a, i) => i % 7 == 6) as string[][]);
-
-    return [implememntationAddresses, gaugeAddresses, referenceAssets, symbols, names, isMeta, coinAddresses]
+    return [implememntationAddresses, gaugeAddresses, oldGaugeAddresses, referenceAssets, symbols, names, isMeta, coinAddresses]
 }
 
 function setFactorySwapContracts(this: ICurve, factorySwapAddresses: string[], factorySwapABIs: any[]): void {
@@ -186,7 +183,6 @@ function setFactoryCoinsContracts(this: ICurve, coinAddresses: string[][]): void
         this.setContract(addr, ERC20ABI);
     }
 }
-
 
 function getExistingCoinAddressNameDict(this: ICurve): IDict<string> {
     const dict: IDict<string> = {}
@@ -254,7 +250,8 @@ export async function getFactoryPoolData(this: ICurve, fromIdx = 0, swapAddress?
         : await getFactoryIdsAndSwapAddresses.call(this, fromIdx, factoryAddress);
     if (rawPoolIds.length === 0) return {};
 
-    const [rawImplementations, rawGauges, rawReferenceAssets, rawPoolSymbols, rawPoolNames, rawIsMeta, rawCoinAddresses] = await getPoolsData.call(this, rawSwapAddresses, factoryAddress);
+    const [rawImplementations, rawGauges, rawOldGauges, rawReferenceAssets, rawPoolSymbols, rawPoolNames, rawIsMeta, rawCoinAddresses] =
+        await getPoolsData.call(this, rawSwapAddresses, factoryAddress);
     const poolIds: string[] = [];
     const swapAddresses: string[] = [];
     const implementations: string[] = [];
@@ -270,7 +267,7 @@ export async function getFactoryPoolData(this: ICurve, fromIdx = 0, swapAddress?
             poolIds.push(rawPoolIds[i]);
             swapAddresses.push(rawSwapAddresses[i]);
             implementations.push(rawImplementations[i]);
-            gaugeAddresses.push(rawGauges[i]);
+            gaugeAddresses.push(rawGauges[i] !== curve.constants.ZERO_ADDRESS ? rawGauges[i] : rawOldGauges[i]);
             referenceAssets.push(rawReferenceAssets[i]);
             poolSymbols.push(rawPoolSymbols[i]);
             poolNames.push(rawPoolNames[i]);

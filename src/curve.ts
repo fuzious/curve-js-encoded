@@ -5,6 +5,9 @@ import {
     BigNumberish,
     Numeric,
     AbstractProvider,
+    BrowserProvider,
+    JsonRpcProvider,
+    Signer,
 } from "ethers";
 import { PublicClient } from 'viem'
 import { getPublicClient } from './helpers.js';
@@ -13,14 +16,11 @@ import { getFactoryPoolData } from "./factory/factory.js";
 import { getFactoryPoolsDataFromApi } from "./factory/factory-api.js";
 import { getCryptoFactoryPoolData } from "./factory/factory-crypto.js";
 import { getTricryptoFactoryPoolData } from "./factory/factory-tricrypto.js";
-import { _getAmplificationCoefficientsFromApi } from "./pools/utils.js";
-import { IPoolData, IDict, ICurve, INetworkName, IChainId, IFactoryPoolType } from "./interfaces";
+import {IPoolData, IDict, ICurve, INetworkName, IChainId, IFactoryPoolType, Abi} from "./interfaces";
 import ERC20Abi from './constants/abis/ERC20.json' assert { type: 'json' };
 import cERC20Abi from './constants/abis/cERC20.json' assert { type: 'json' };
 import yERC20Abi from './constants/abis/yERC20.json' assert { type: 'json' };
-import gaugeFactoryABI from './constants/abis/gauge_factory_mainnet.json' assert { type: 'json' };
-import gaugeFactoryForFraxtalABI from './constants/abis/gauge_factory_mainnet_for_fraxtal.json' assert { type: 'json' };
-import gaugeFactorySidechainABI from './constants/abis/gauge_factory_sidechain.json' assert { type: 'json' };
+import childGaugeFactoryABI from './constants/abis/gauge_factory/child_gauge_factory.json' assert { type: 'json' };
 import minterMainnetABI from './constants/abis/minter_mainnet.json' assert { type: 'json' };
 import votingEscrowABI from './constants/abis/votingescrow.json' assert { type: 'json' };
 import anycallABI from './constants/abis/anycall.json' assert { type: 'json' };
@@ -41,12 +41,14 @@ import factoryEywaABI from './constants/abis/factory-eywa.json' assert { type: '
 import factoryAdminABI from './constants/abis/factory-admin.json' assert { type: 'json' };
 import cryptoFactoryABI from './constants/abis/factory-crypto.json' assert { type: 'json' };
 import twocryptoFactoryABI from './constants/abis/factory-twocrypto-ng.json' assert { type: 'json' };
-import tricryptoFactoryABI from './constants/abis/factory-tricrypto.json' assert { type: 'json' };
+import tricryptoFactoryMainnetABI from './constants/abis/factory-tricrypto-mainnet.json' assert { type: 'json' };
+import tricryptoFactorySidechainABI from './constants/abis/factory-tricrypto-sidechain.json' assert { type: 'json' };
 import stableNgFactoryABI from './constants/abis/factory-stable-ng.json' assert { type: 'json' };
 import gasOracleABI from './constants/abis/gas_oracle_optimism.json' assert { type: 'json'};
 import gasOracleBlobABI from './constants/abis/gas_oracle_optimism_blob.json' assert { type: 'json'};
 import votingProposalABI from './constants/abis/voting_proposal.json' assert { type: 'json'};
 import circulatingSupplyABI from './constants/abis/circulating_supply.json' assert { type: 'json'};
+import rootGaugeFactoryABI from "./constants/abis/gauge_factory/root_gauge_factory.json" assert { type: 'json'};
 
 
 import {
@@ -106,26 +108,35 @@ import { COINS_FRAXTAL, cTokensFraxtal,  yTokensFraxtal, ycTokensFraxtal, aToken
 import { COINS_XLAYER, cTokensXLayer,  yTokensXLayer, ycTokensXLayer, aTokensXLayer } from "./constants/coins/xlayer.js";
 import { COINS_MANTLE, cTokensMantle,  yTokensMantle, ycTokensMantle, aTokensMantle } from "./constants/coins/mantle.js";
 import { lowerCasePoolDataAddresses, extractDecimals, extractGauges } from "./constants/utils.js";
-import { _getAllGauges, _getHiddenPools } from "./external-api.js";
+import { _getHiddenPools } from "./external-api.js";
 import { L2Networks } from "./constants/L2Networks.js";
 import { getTwocryptoFactoryPoolData } from "./factory/factory-twocrypto.js";
-import {getGasInfoForL2, memoizedContract, memoizedMulticallContract} from "./utils.js";
+import { _getAmplificationCoefficientsFromApi } from "./pools/utils.js";
 
-const _killGauges = async (poolsData: IDict<IPoolData>): Promise<void> => {
-    const gaugeData = await _getAllGauges();
-    const isKilled: IDict<boolean> = {};
-    const gaugeStatuses: IDict<Record<string, boolean> | null> = {};
-    Object.values(gaugeData).forEach((d) => {
-        isKilled[d.gauge.toLowerCase()] = d.is_killed ?? false;
-        gaugeStatuses[d.gauge.toLowerCase()] = d.gaugeStatus ?? null;
-    });
-
-    for (const poolId in poolsData) {
-        if (isKilled[poolsData[poolId].gauge_address]) {
-            poolsData[poolId].is_gauge_killed = true;
+export const memoizedContract = (): (address: string, abi: any, provider: BrowserProvider | JsonRpcProvider | Signer) => Contract => {
+    const cache: Record<string, Contract> = {};
+    return (address: string, abi: any, provider: BrowserProvider | JsonRpcProvider | Signer): Contract => {
+        if (address in cache) {
+            return cache[address];
         }
-        if (gaugeStatuses[poolsData[poolId].gauge_address]) {
-            poolsData[poolId].gauge_status = gaugeStatuses[poolsData[poolId].gauge_address];
+        else {
+            const result = new Contract(address, abi, provider)
+            cache[address] = result;
+            return result;
+        }
+    }
+}
+
+export const memoizedMulticallContract = (): (address: string, abi: any) => MulticallContract => {
+    const cache: Record<string, MulticallContract> = {};
+    return (address: string, abi: any): MulticallContract => {
+        if (address in cache) {
+            return cache[address];
+        }
+        else {
+            const result = new MulticallContract(address, abi)
+            cache[address] = result;
+            return result;
         }
     }
 }
@@ -411,6 +422,9 @@ export const NETWORK_CONSTANTS: { [index: number]: any } = {
 
 const OLD_CHAINS = [1, 10, 56, 100, 137, 250, 1284, 2222, 8453, 42161, 42220, 43114, 1313161554];  // these chains have non-ng pools
 
+
+export type ContractItem = { contract: Contract, multicallContract: MulticallContract, abi: Abi };
+
 class Curve implements ICurve {
     provider: ethers.BrowserProvider | ethers.JsonRpcProvider;
     viemProvider: PublicClient;
@@ -419,7 +433,7 @@ class Curve implements ICurve {
     signer: ethers.Signer | null;
     signerAddress: string;
     chainId: IChainId;
-    contracts: { [index: string]: { contract: Contract, multicallContract: MulticallContract } };
+    contracts: { [index: string]: ContractItem };
     feeData: { gasPrice?: number, maxFeePerGas?: number, maxPriorityFeePerGas?: number };
     constantOptions: { gasLimit?: number };
     options: { gasPrice?: number | bigint, maxFeePerGas?: number | bigint, maxPriorityFeePerGas?: number | bigint };
@@ -673,14 +687,19 @@ class Curve implements ICurve {
         this.setContract(this.constants.ALIASES.crv, ERC20Abi);
         this.constants.DECIMALS[this.constants.ALIASES.crv] = 18;
 
-        const _gaugeFactoryABI = this.chainId === 1 ? gaugeFactoryABI : gaugeFactorySidechainABI
-        this.setContract(this.constants.ALIASES.gauge_factory, _gaugeFactoryABI);
-
         if(this.chainId === 1) {
-            this.setContract(this.constants.ALIASES.minter, minterMainnetABI)
-            this.setContract(this.constants.ALIASES.gauge_factory_fraxtal, gaugeFactoryForFraxtalABI)
+            this.setContract(this.constants.ALIASES.minter, minterMainnetABI);
             this.setContract(this.constants.ALIASES.fee_distributor_crvusd, feeDistributorCrvUSDABI);
+            this.setContract(this.constants.ALIASES.root_gauge_factory, rootGaugeFactoryABI);
+            //TODO should be deleted
+            this.setContract(this.constants.ALIASES.root_gauge_factory_arbitrum, rootGaugeFactoryABI);
+        } else {
+            this.setContract(this.constants.ALIASES.child_gauge_factory, childGaugeFactoryABI);
+            if ("child_gauge_factory_old" in this.constants.ALIASES) {
+                this.setContract(this.constants.ALIASES.child_gauge_factory_old, childGaugeFactoryABI);
+            }
         }
+
 
         this.setContract(this.constants.ALIASES.voting_escrow, votingEscrowABI);
 
@@ -704,11 +723,10 @@ class Curve implements ICurve {
 
         this.setContract(this.constants.ALIASES.factory, factoryABI);
 
-        if (this.chainId !== 1313161554 && this.chainId !== 252 && this.chainId !== 196 && this.chainId !== 5000) {
+        if (this.chainId !== 1313161554 && this.chainId !== 252 && this.chainId !== 324 && this.chainId !== 196 && this.chainId !== 5000) {
             const factoryContract = this.contracts[this.constants.ALIASES.factory].contract;
             this.constants.ALIASES.factory_admin = (await factoryContract.admin(this.constantOptions) as string).toLowerCase();
             this.setContract(this.constants.ALIASES.factory_admin, factoryAdminABI);
-
         }
 
         this.setContract(this.constants.ALIASES.crvusd_factory, factoryABI);
@@ -719,7 +737,11 @@ class Curve implements ICurve {
 
         this.setContract(this.constants.ALIASES.twocrypto_factory, twocryptoFactoryABI);
 
-        this.setContract(this.constants.ALIASES.tricrypto_factory, tricryptoFactoryABI);
+        if (this.chainId == 1) {
+            this.setContract(this.constants.ALIASES.tricrypto_factory, tricryptoFactoryMainnetABI);
+        } else {
+            this.setContract(this.constants.ALIASES.tricrypto_factory, tricryptoFactorySidechainABI);
+        }
 
         this.setContract(this.constants.ALIASES.stable_ng_factory, stableNgFactoryABI);
 
@@ -827,7 +849,7 @@ class Curve implements ICurve {
     }
 
     fetchFactoryPools = async (useApi = true): Promise<void> => {
-        if ([196, 252, 5000, 1313161554].includes(this.chainId)) return;
+        if ([196, 252, 324, 5000, 1313161554].includes(this.chainId)) return;
 
         if (useApi) {
             this.constants.FACTORY_POOLS_DATA = lowerCasePoolDataAddresses(await getFactoryPoolsDataFromApi.call(this, "factory"));
@@ -884,7 +906,7 @@ class Curve implements ICurve {
     }
 
     fetchTworyptoFactoryPools = async (useApi = true): Promise<void> => {
-        if ([324, 1284].includes(this.chainId)) return;
+        if ([1284].includes(this.chainId)) return;
 
         if (useApi) {
             this.constants.TWOCRYPTO_FACTORY_POOLS_DATA = lowerCasePoolDataAddresses(await getFactoryPoolsDataFromApi.call(this, "factory-twocrypto"));
@@ -898,7 +920,7 @@ class Curve implements ICurve {
     }
 
     fetchTricryptoFactoryPools = async (useApi = true): Promise<void> => {
-        if ([324, 1284].includes(this.chainId)) return;
+        if ([1284].includes(this.chainId)) return;
 
         if (useApi) {
             this.constants.TRICRYPTO_FACTORY_POOLS_DATA = lowerCasePoolDataAddresses(await getFactoryPoolsDataFromApi.call(this, "factory-tricrypto"));
@@ -913,7 +935,7 @@ class Curve implements ICurve {
                 await this.contracts[this.constants.ALIASES.tricrypto_factory].contract.gauge_implementation(this.constantOptions);
         } else {
             this.constants.FACTORY_GAUGE_IMPLEMENTATIONS["factory-tricrypto"] =
-                await this.contracts[this.constants.ALIASES.gauge_factory].contract.get_implementation(this.constantOptions);
+                await this.contracts[this.constants.ALIASES.child_gauge_factory].contract.get_implementation(this.constantOptions);
         }
     }
 
@@ -965,7 +987,7 @@ class Curve implements ICurve {
     }
 
     fetchNewTwocryptoFactoryPools = async (): Promise<string[]> => {
-        if ([324, 1284].includes(this.chainId)) return [];
+        if ([1284].includes(this.chainId)) return [];
 
         const currentPoolIds = Object.keys(this.constants.TWOCRYPTO_FACTORY_POOLS_DATA);
         const lastPoolIdx = currentPoolIds.length === 0 ? -1 : Number(currentPoolIds[currentPoolIds.length - 1].split("-")[2]);
@@ -977,7 +999,7 @@ class Curve implements ICurve {
     }
 
     fetchNewTricryptoFactoryPools = async (): Promise<string[]> => {
-        if ([324, 1284].includes(this.chainId)) return [];
+        if ([1284].includes(this.chainId)) return [];
 
         const currentPoolIds = Object.keys(this.constants.TRICRYPTO_FACTORY_POOLS_DATA);
         const lastPoolIdx = currentPoolIds.length === 0 ? -1 : Number(currentPoolIds[currentPoolIds.length - 1].split("-")[2]);
@@ -1018,7 +1040,7 @@ class Curve implements ICurve {
     }
 
     fetchRecentlyDeployedTwocryptoFactoryPool = async (poolAddress: string): Promise<string> => {
-        if ([324, 1284].includes(this.chainId)) return '';
+        if ([1284].includes(this.chainId)) return '';
         const poolData = lowerCasePoolDataAddresses(await getTwocryptoFactoryPoolData.call(this, 0, poolAddress));
         this.constants.TWOCRYPTO_FACTORY_POOLS_DATA = { ...this.constants.TWOCRYPTO_FACTORY_POOLS_DATA, ...poolData };
         this._updateDecimalsAndGauges(this.constants.TWOCRYPTO_FACTORY_POOLS_DATA);
@@ -1027,7 +1049,7 @@ class Curve implements ICurve {
     }
 
     fetchRecentlyDeployedTricryptoFactoryPool = async (poolAddress: string): Promise<string> => {
-        if ([324, 1284].includes(this.chainId)) return '';
+        if ([1284].includes(this.chainId)) return '';
         const poolData = lowerCasePoolDataAddresses(await getTricryptoFactoryPoolData.call(this, 0, poolAddress));
         this.constants.TRICRYPTO_FACTORY_POOLS_DATA = { ...this.constants.TRICRYPTO_FACTORY_POOLS_DATA, ...poolData };
         this._updateDecimalsAndGauges(this.constants.TRICRYPTO_FACTORY_POOLS_DATA);

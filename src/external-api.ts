@@ -192,13 +192,13 @@ export const _getFactoryAPYs = memoize(
                 address: item.poolAddress,
                 volumeUSD: item.totalVolumeUsd ?? 0,
                 day: item.apy ?? 0,
-                week: item.apy*7 ?? 0, //Because api does not return week apy
+                week: 0, //Because api does not return week apy
             }
         })
 
         return {
             poolsData: poolsData ?? [],
-            totalVolume: stableVolume + cryptoVolume ?? 0,
+            totalVolume: stableVolume + cryptoVolume,
             cryptoVolume: cryptoVolume ?? 0,
             cryptoShare: 100*cryptoVolume/(stableVolume + cryptoVolume) || 0,
         };
